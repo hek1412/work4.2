@@ -1,17 +1,5 @@
 # work4.2
 
---CREATE TABLE users (
---    id SERIAL PRIMARY KEY,
---    name TEXT,
---    email TEXT);
---
---CREATE TABLE users_history (
---    id SERIAL,
---    user_id INT,
---    old_name TEXT,
---    old_email TEXT,
---    changed_at TIMESTAMP DEFAULT now()
---);
 
 CREATE TABLE users (
     id SERIAL PRIMARY KEY,
@@ -30,7 +18,7 @@ CREATE TABLE users_audit (
     old_value TEXT,
     new_value TEXT
 );
-
+-- Создаем функцию логирования
 CREATE OR REPLACE FUNCTION log_user_changes()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -59,63 +47,58 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Создаем тригер
 CREATE TRIGGER trigger_log_user_changes
 BEFORE UPDATE ON users
 FOR EACH ROW
 EXECUTE FUNCTION log_user_changes();
 
---CREATE OR REPLACE FUNCTION log_user_update()
---RETURNS TRIGGER AS $$
---BEGIN
---    INSERT INTO users_history(user_id, old_name, old_email)
---    VALUES (OLD.id, OLD.name, OLD.email);
---    RETURN NEW;
---END;
---$$ LANGUAGE plpgsql;
---
---CREATE TRIGGER trigger_log_user_update
---BEFORE UPDATE ON users
---FOR EACH ROW
---EXECUTE FUNCTION log_user_update();
 
 INSERT INTO users (name, email, role)
 VALUES 
 ('Ivan Ivanov', 'ivan@example.com', 'director'),
 ('Anna Petrova', 'anna@example.com', 'manager');
 
---INSERT INTO users (name, email)
---VALUES 
---('Ivan Ivanov', 'ivan@example.com'),
---('Anna Petrova', 'anna@example.com');
---
+-- Обновляем данные
 UPDATE users
 SET role = 'HR'
 WHERE name = 'Ivan Ivanov';
 
+-- Смотрим таблицы
 SELECT * FROM users;
-
+SELECT * FROM users_audit;
 
 -- Если нужно разрешить запись в /tmp из PostgreSQL
 ALTER SYSTEM SET cron.database_name = 'example_db';
 ALTER SYSTEM SET cron.log_run = 'on';
 
 
-
+-- Создаем функцию export_users()
 CREATE OR REPLACE FUNCTION export_users()
+-- Функция не возвращает значений
 RETURNS VOID AS $$
 DECLARE
+    -- Переменная для хранения пути к экспортируемому файлу
     export_filename TEXT;
+    -- Переменная для хранения количества экспортированных строк
     rows_exported INTEGER;
+    -- Переменная для формирования сообщений об ошибках
     error_message TEXT;
+    -- Переменная для хранения текста SQL-команды COPY
     copy_command TEXT;
 BEGIN
-    -- Формируем имя файла с текущей датой
+    -- Формируем имя файла в формате: /tmp/users_audit_export_ГГГГ-ММ-ДД.csv
     export_filename := '/tmp/users_audit_export_' || to_char(CURRENT_DATE, 'YYYY-MM-DD') || '.csv';
     
+    -- Выводим информационное сообщение о начале экспорта
     RAISE NOTICE 'Начало экспорта аудит-данных в файл: %', export_filename;
     
+    -- Начало блока с обработкой исключений
     BEGIN
-        -- Создаем полную команду COPY с подставленным именем файла
+        -- Формируем текст SQL-команды COPY:
+        -- 1. Выбираем все записи из users_audit за текущий день
+        -- 2. Сортируем по дате изменения
+        -- 3. Экспортируем в CSV файл с заголовками столбцов
         copy_command := '
             COPY (
                 SELECT * FROM users_audit 
@@ -124,35 +107,57 @@ BEGIN
                 ORDER BY changed_at
             ) TO ''' || export_filename || ''' WITH CSV HEADER';
         
-        -- Выполняем команду
+        -- Выполняем сформированную команду
         EXECUTE copy_command;
         
-        -- Получаем количество экспортированных строк
+        -- Получаем количество обработанных строк
         GET DIAGNOSTICS rows_exported = ROW_COUNT;
         
+        -- Выводим сообщение об успешном завершении экспорта
         RAISE NOTICE 'Успешно экспортировано % строк в файл: %', rows_exported, export_filename;
         
+    -- Блок обработки исключений
     EXCEPTION
+        -- Обработка ошибки недостатка прав
         WHEN insufficient_privilege THEN
             error_message := 'Ошибка: Нет прав на запись в файл ' || export_filename;
             RAISE EXCEPTION '%', error_message;
             
+        -- Обработка всех остальных ошибок    
         WHEN others THEN
+            -- Формируем сообщение об ошибке с деталями из PostgreSQL
             error_message := 'Ошибка при экспорте: ' || SQLERRM;
+            -- Выводим сообщение об ошибке с указанием проблемного файла
             RAISE EXCEPTION '% Исходный файл: %', error_message, export_filename;
     END;
 END;
+-- Завершение функции, указание языка PL/pgSQL
 $$ LANGUAGE plpgsql;
 
-
+-- Вызываем функцию
 SELECT export_users();
 
+-- Проверка установленного расширения
 SELECT extname FROM pg_extension WHERE extname = 'pg_cron';
+
+--Установка расширения
 CREATE EXTENSION IF NOT EXISTS pg_cron;
--- Задача будет выполняться ежедневно в 3:00 ночи
+
+-- Настройка ежедневного задания
 SELECT cron.schedule(
     'nightly_audit_export',
     '0 3 * * *', -- Каждый день в 3:00
+    $$SELECT export_users()$$
+);
+
+-- Просмотр активных задач cron
+SELECT * FROM cron.job;
+
+-- Удаление задачи cron
+SELECT cron.unschedule('nightly_audit_export');
+
+-- Удаление cron
+DROP EXTENSION pg_cron;
     $$SELECT export_users()$$
 );
 -- Просмотр активных задач cron
